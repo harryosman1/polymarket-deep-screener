@@ -7,15 +7,15 @@ modification of the bot's source.
 
 Phase 1 (discover): crawl top active markets by volume, aggregate
 wallets trading at human size ($20-$5k median, max <= $50k single trade).
-Checkpointed to /tmp/screen-v3/discovered.json.
+Checkpointed to OUT_DIR/discovered.json.
 
 Phase 2 (deep screen): paged TRADE history (3 pages of 1000) + REDEEM
 events, per-market cashflow win rate on closed markets (net shares ~ 0
 in-window), plus realized P&L on those closed markets.
 
 A wallet PASSES when, over the analysis window, it is:
-  - winning:      win_rate >= 60% with >= 15 closed markets
-  - profitable:   realized P&L on closed markets > 0
+  - winning:      win_rate >= 60% with >= 20 closed markets
+  - profitable:   realized P&L on closed markets >= $500
   - directional:  trades both sides in < 30% of markets
   - human-paced:  10..1500 trades in 30d
   - human-sized:  $20 <= median trade <= $5,000, no single trade > $50k
@@ -29,6 +29,11 @@ KNOWN LIMITATIONS (treat passers as candidates, not conclusions):
     P&L can differ from Polymarket's profile P&L.
   - Open positions are ignored (profiles mark them to market).
 
+Output directory:
+  Set PM_SCREEN_DIR env var to override the default (/tmp/screen-v3).
+  Note: /tmp may be cleared on reboot; set PM_SCREEN_DIR to a persistent
+  path (e.g. /opt/polymarket-bot/screen-results) to survive restarts.
+
 CLI:
   python scripts/screen_directional.py          # first 60 candidates
   python scripts/screen_directional.py 60       # next batch, etc.
@@ -36,7 +41,9 @@ CLI:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -49,7 +56,11 @@ from src.shadow_list import ShadowList
 
 NOW = int(time.time())
 DAY = 86_400
-OUT_DIR = Path("/tmp/screen-v3")
+
+# Fix 2: Accept PM_SCREEN_DIR env var; fall back to /tmp/screen-v3.
+# Set PM_SCREEN_DIR to a persistent path to survive reboots, e.g.:
+#   export PM_SCREEN_DIR=/opt/polymarket-bot/screen-results
+OUT_DIR = Path(os.environ.get("PM_SCREEN_DIR", "/tmp/screen-v3"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 N_MARKETS = 120
@@ -57,7 +68,7 @@ N_DEEP = 60
 PAGES = 3
 
 MIN_WIN_RATE = 0.60
-MIN_CLOSED = 15
+MIN_CLOSED = 20
 MAX_TWO_SIDED = 0.30
 MIN_TRADES_30D = 10
 MAX_TRADES_30D = 1500
@@ -65,11 +76,16 @@ MIN_MEDIAN_USD = 20.0
 MAX_MEDIAN_USD = 5000.0
 MAX_SINGLE_TRADE_USD = 50_000.0
 MAX_DAYS_SINCE_TRADE = 14
+MIN_CLOSED_PNL = 500.0
 
 # Deep-screen the moderately-active band of discovered wallets.
 # The hyperactive top of the list is market-maker bots by construction.
 BAND_MIN_TRADES = 5
 BAND_MAX_TRADES = 50
+
+# Fix 3: Retry settings for transient API errors.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 0.1  # seconds; doubles each attempt (100ms, 200ms, 400ms)
 
 
 def usd(a: dict) -> float:
@@ -80,6 +96,27 @@ def usd(a: dict) -> float:
         return float(v or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _with_retry(fn, label: str):
+    """Call fn() up to _RETRY_ATTEMPTS times with exponential backoff.
+
+    Retries on any exception. Raises the last exception if all attempts fail.
+    Used for API calls that may hit transient network errors or rate limits.
+    """
+    delay = _RETRY_BASE_DELAY
+    last_exc: Exception | None = None
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _RETRY_ATTEMPTS:
+                print(f"  [{label}] attempt {attempt} failed ({str(exc)[:40]}), "
+                      f"retrying in {delay:.1f}s…", flush=True)
+                time.sleep(delay)
+                delay *= 2
+    raise last_exc
 
 
 def discover(api: DataApiClient) -> list[dict]:
@@ -109,9 +146,13 @@ def discover(api: DataApiClient) -> list[dict]:
     for i, m in enumerate(markets, 1):
         cid = m["conditionId"]
         try:
-            trades = api.get_trades_by_market(cid, limit=1000)
+            # Fix 3: retry market trade fetches on transient errors.
+            trades = _with_retry(
+                lambda: api.get_trades_by_market(cid, limit=1000),
+                label=cid[:10],
+            )
         except Exception as exc:
-            print(f"  [{i}] {cid[:10]} fetch failed: {str(exc)[:40]}")
+            print(f"  [{i}] {cid[:10]} fetch failed after retries: {str(exc)[:40]}")
             continue
         for t in trades:
             w = (t.get("proxyWallet") or "").lower()
@@ -136,12 +177,39 @@ def discover(api: DataApiClient) -> list[dict]:
             continue
         out.append({"address": w, "n": rec["n"], "median": med, "max": rec["max"]})
     out.sort(key=lambda r: r["n"], reverse=True)
-    ckpt.write_text(json.dumps(out))
+
+    # Fix 1: Atomic checkpoint write — write to a temp file in the same
+    # directory, then rename. rename() is atomic on POSIX; prevents a
+    # partially-written file being read by a concurrent process.
+    tmp = OUT_DIR / f"discovered.json.tmp.{os.getpid()}"
+    tmp.write_text(json.dumps(out))
+    tmp.rename(ckpt)
+
     print(f"[discover] {len(out)} human-size wallets (checkpointed)")
     return out
 
 
 def paged_activity(api: DataApiClient, addr: str, typ: str, pages: int) -> list[dict]:
+    """Fetch up to `pages` pages of activity for `addr` of type `typ`.
+
+    Fix 4: Documents the private API dependency.
+
+    Uses api._get("/activity", params) directly because DataApiClient's
+    public get_activity_by_user() does not expose the `end` (timestamp
+    cursor) parameter needed for multi-page fetches. If DataApiClient is
+    refactored, update this function to use the public method once it
+    supports pagination, or add `end` to the public interface.
+
+    Expected response shape per item (camelCase dict):
+      - timestamp:   int unix seconds
+      - type:        str "TRADE" | "REDEEM" | "SPLIT" | "MERGE"
+      - conditionId: str hex market ID
+      - side:        str "BUY" | "SELL" (TRADE only; empty for REDEEM)
+      - size:        float shares
+      - usdcSize:    float USDC notional (present on activity endpoint;
+                     absent on /trades — that's why we use /activity)
+      - price:       float (0.0 for REDEEMs)
+    """
     acc, end = [], None
     for _ in range(pages):
         params = {"user": addr, "limit": 1000, "type": typ}
@@ -199,10 +267,29 @@ def metrics(trades: list[dict], redeems: list[dict]) -> dict:
     for f in flow.values():
         if f["out"] <= 0:
             continue
-        # closed = in-window net shares ~ zero. abs() matters: redeems of
-        # shares bought BEFORE the window drive net negative and must not
-        # count as closed (their buy cost is outside the window).
-        if abs(f["sh"]) <= max(0.02 * f["out"], 1.0):
+        # Fix 5: "Closed" means the trader fully exited this market
+        # within the analysis window (net residual shares ~ zero).
+        #
+        # Tolerance = max(2% of cost basis, $1.00 floor).
+        #
+        # The percentage component (2% of out) handles large positions
+        # where floating-point accumulation across many fills can leave
+        # a small fractional residual; without it, a $5,000 position
+        # with a $0.50 rounding tail would be wrongly excluded.
+        #
+        # The $1.00 floor handles tiny positions ($5–$10 bets) where
+        # 2% of cost basis rounds to near zero and is too strict.
+        #
+        # abs() is required: redeems for shares bought BEFORE the window
+        # drive net shares negative; without abs() those would pass the
+        # check and attribute redemption proceeds as free profit (no
+        # matching buy cost in the window).
+        #
+        # Alternative: a pure absolute threshold (e.g. residual < $5)
+        # would be simpler but breaks on large positions where rounding
+        # routinely exceeds $5. The hybrid is intentional.
+        tolerance = max(0.02 * f["out"], 1.0)
+        if abs(f["sh"]) <= tolerance:
             closed += 1
             closed_pnl += f["in"] - f["out"]
             if f["in"] > f["out"]:
@@ -236,10 +323,17 @@ def main() -> None:
             addr = c["address"]
             print(f"[{i}/{len(cands)}] {addr[:14]}…", end=" ", flush=True)
             try:
-                trades = paged_activity(api, addr, "TRADE", PAGES)
-                redeems = paged_activity(api, addr, "REDEEM", 1)
+                # Fix 3: retry paged activity fetches on transient errors.
+                trades = _with_retry(
+                    lambda: paged_activity(api, addr, "TRADE", PAGES),
+                    label=f"{addr[:10]}/TRADE",
+                )
+                redeems = _with_retry(
+                    lambda: paged_activity(api, addr, "REDEEM", 1),
+                    label=f"{addr[:10]}/REDEEM",
+                )
             except Exception as exc:
-                print(f"SKIP fetch failed: {str(exc)[:40]}")
+                print(f"SKIP fetch failed after retries: {str(exc)[:40]}")
                 continue
             m = metrics(trades, redeems)
             m["address"] = addr
@@ -257,7 +351,7 @@ def main() -> None:
                 reasons.append(f"med=${m['median_usd']:.0f}")
             if m["max_trade_usd"] > MAX_SINGLE_TRADE_USD:
                 reasons.append(f"whale_max=${m['max_trade_usd']:,.0f}")
-            if m["closed_pnl"] <= 0:
+            if m["closed_pnl"] < MIN_CLOSED_PNL:
                 reasons.append(f"pnl=${m['closed_pnl']:,.0f}")
             if m["days_since_trade"] > MAX_DAYS_SINCE_TRADE:
                 reasons.append(f"stale={m['days_since_trade']:.0f}d")
@@ -272,14 +366,20 @@ def main() -> None:
             time.sleep(0.4)
 
     passers.sort(key=lambda m: (m["win_rate"], m["closed"]), reverse=True)
-    (OUT_DIR / "passers.json").write_text(json.dumps(passers, indent=1))
+
+    # Fix 1: Atomic write for passers.json too.
+    out_path = OUT_DIR / "passers.json"
+    tmp = OUT_DIR / f"passers.json.tmp.{os.getpid()}"
+    tmp.write_text(json.dumps(passers, indent=1))
+    tmp.rename(out_path)
+
     print(f"\n=== {len(passers)} PASSERS ===")
     for m in passers:
         print(f"  {m['address']}  wr={m['win_rate']:.0%} ({m['closed']} closed)  "
               f"2-sided={m['two_sided_ratio']:.0%}  t30={m['trades_30d']}  "
               f"med=${m['median_usd']:.0f}  max=${m['max_trade_usd']:,.0f}  "
               f"pnl=${m['closed_pnl']:,.0f}")
-    print(f"\nsaved: {OUT_DIR/'passers.json'}")
+    print(f"\nsaved: {out_path}")
 
 
 if __name__ == "__main__":
