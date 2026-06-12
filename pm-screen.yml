@@ -1,0 +1,27 @@
+# pm-screen.yml — thresholds for screen_directional.py
+#
+# Copy this next to the script (or pass --config path/to/file.yml).
+# Any key omitted falls back to the built-in default shown here.
+# CLI flags (--min-win-rate, --min-closed, --min-closed-pnl) override
+# whatever is in this file.
+
+filters:
+  min_win_rate: 0.60            # min win rate over closed markets
+  min_closed_markets: 20        # min fully-exited markets in window
+  max_two_sided_ratio: 0.30     # >= this fraction of markets traded both sides = bot/MM
+  min_trades_30d: 10            # must be currently active
+  max_trades_30d: 1500          # above this = machine-gun bot
+  min_median_usd: 20.0          # below this = micro-bot
+  max_median_usd: 5000.0        # above this = whale
+  max_single_trade_usd: 50000.0 # any single trade above this = whale
+  max_days_since_trade: 14      # must have traded recently
+  min_closed_pnl: 500.0         # min realized P&L on closed markets
+
+discovery:
+  n_markets: 120                # top markets by 24h volume to crawl
+  band_min_trades: 5            # moderate-activity band: humans live here;
+  band_max_trades: 50           # the hyperactive top is bots by construction
+
+deep_screen:
+  n_deep: 60                    # candidates per batch
+  pages: 3                      # activity pages per wallet (1000 each)
