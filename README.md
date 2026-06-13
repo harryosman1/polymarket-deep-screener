@@ -230,3 +230,40 @@ Claude will handle downloading the files and uploading them to your VPS.
 MIT for these scripts. This screener is an add-on — it does not include
 any source from the tradingbot engine, which is sold under a separate
 license that prohibits redistribution.
+
+## One-command pipeline (recommended)
+
+Instead of running screen + verify separately, use `run_pipeline.sh` to
+do everything in one shot:
+
+```bash
+# Full run — all 899 wallets, screen + verify each batch automatically
+./scripts/run_pipeline.sh
+
+# Start from a specific batch (useful if resuming)
+./scripts/run_pipeline.sh 60
+
+# Run a subset of batches
+./scripts/run_pipeline.sh 0 180
+```
+
+What it does for each batch:
+1. Runs `screen_directional.py` (phase 1 + 2)
+2. If any wallets pass, **immediately** runs `verify_passers.py` (phase 3)
+3. Accumulates all verified results in `all_verified_passers.json`
+4. Prints a final summary at the end
+
+Example final output:
+```
+=== FINAL PIPELINE SUMMARY ===
+  Total verified:  15
+  Promising:       1
+  Negative P&L:    13
+  Unclear/error:   1
+
+=== WORTH SHADOWING (1) ===
+  0x7eb89b08c2e8…  all_time=+$7,406  screen_wr=82%  predictions=34
+```
+
+Full log saved to `$PM_SCREEN_DIR/pipeline.log`. The entire 899-wallet
+run takes ~30 minutes (most wallets load from cache after the first run).
