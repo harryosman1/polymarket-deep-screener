@@ -197,3 +197,18 @@ The screen is a filter, not a verdict.
 MIT for this script. This screener is an add-on — it does not include
 any source from the tradingbot engine, which is sold under a separate
 license that prohibits redistribution.
+
+## Staying Updated
+
+This repo is actively maintained. To update your scripts:
+
+**Easiest way — use Claude:**
+Paste the repo link into Claude and say:
+> "Update my polymarket screener scripts with the latest version from this repo"
+
+Claude will handle downloading the files and uploading them to your VPS.
+
+**Manual way:**
+1. Download any changed files from the repo
+2. Upload to your VPS: `scp file.py root@YOUR_VPS_IP:/opt/polymarket-bot/scripts/`
+3. That's it — no reinstall or bot restart required
