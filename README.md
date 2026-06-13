@@ -1,9 +1,9 @@
 # Polymarket Deep Screener
 
-A two-phase wallet screener that finds **directional human traders** on
-Polymarket — and filters out the bots, market makers, and whales that
-dominate the leaderboards. Built as an add-on for the tradingbot
-copy-trading engine.
+A three-step pipeline that finds **directional human traders** on
+Polymarket, filters out bots/whales/leaderboard frauds, and
+automatically verifies their all-time profit before you shadow anyone.
+Built as an add-on for the tradingbot copy-trading engine.
 
 ## Why
 
@@ -16,9 +16,17 @@ The Polymarket profit leaderboard is almost useless for copy trading:
 - A high win rate alone says nothing — a trader can win 77% of markets
   and still lose money (small wins on favorites, occasional big losses)
 
-This screener measures what actually matters: **recent realized win rate
-AND realized profit on closed markets, at human trade sizes, with
-one-directional conviction.**
+In live testing, **11 out of 13 screener passers had negative all-time
+profit** when verified against their full profile. The pipeline below
+catches all of them automatically.
+
+## The three scripts
+
+| Script | What it does |
+|---|---|
+| `screen_directional.py` | Phase 1 + 2: discovers human-sized wallets from active markets, deep-screens for win rate + realized P&L |
+| `verify_passers.py` | Pulls live all-time profit, positions value, biggest win, and trade count for every passer — flags negative all-time automatically |
+| `pm-screen.yml` | Config file for all thresholds — no code edits needed |
 
 ## How it works
 
@@ -29,9 +37,9 @@ Checkpointed to `discovered.json` — delete it to force a re-crawl.
 
 **Phase 2 — deep screen.** For the moderately-active band of those
 wallets (the hyperactive top is market-maker bots by construction),
-pulls ~3,000 trades + redemption events per wallet via timestamp-paged
-requests, reconstructs per-market cashflows, and computes win rate and
-realized P&L over markets the wallet fully exited in-window.
+pulls ~3,000 trades + redemption events per wallet, reconstructs
+per-market cashflows, and computes win rate and realized P&L over
+markets the wallet fully exited in-window.
 
 A wallet **passes** when it is:
 - **Winning:** ≥60% win rate over ≥20 closed markets
@@ -41,42 +49,72 @@ A wallet **passes** when it is:
 - **Human-sized:** $20–$5,000 median trade, no single trade >$50k
 - **Active:** traded within the last 14 days
 
+**Phase 3 — verify.** `verify_passers.py` fetches live profile data for
+every passer — all-time profit, positions value, biggest win, prediction
+count — and flags anyone with negative all-time P&L as `SKIP`.
+
 ## Install
 
-Requires a working install of the tradingbot copy-trading engine. This
-script imports its API clients and shadow list — no bot files are
-included or modified here.
+Requires a working install of the tradingbot copy-trading engine. These
+scripts import its API clients and shadow list — no bot files are
+included or modified.
 
 ```bash
-cp screen_directional.py pm-screen.yml /opt/polymarket-bot/scripts/
+cp screen_directional.py verify_passers.py pm-screen.yml /opt/polymarket-bot/scripts/
 cd /opt/polymarket-bot
 ```
 
-## Usage
+## Full workflow
 
 ```bash
-# Run first batch (wallets 0–59)
-.venv/bin/python scripts/screen_directional.py
-
-# Run subsequent batches
-.venv/bin/python scripts/screen_directional.py 60
-.venv/bin/python scripts/screen_directional.py 120
-
-# Run all batches unattended (~2 hours)
+# Step 1: Run the screen (all batches, ~2 hours)
 for off in 0 60 120 180 240 300 360 420 480 540 600 660 720 780 840; do
   echo "===== BATCH $off ====="
   .venv/bin/python scripts/screen_directional.py $off
 done 2>&1 | tee /tmp/screen-v3/full-run.log
 
-# Check passers across all batches
+# Check who passed
 grep -E "PASS|BATCH" /tmp/screen-v3/full-run.log
+
+# Step 2: Verify passers against live profile data
+.venv/bin/python scripts/verify_passers.py
+
+# Step 3: Add survivors to shadow list
+.venv/bin/python -c "
+from src.shadow_list import ShadowList
+sl = ShadowList()
+sl.add_trader('0xADDRESS_HERE', 'name', 'screener')
+print(sl.as_watched_map())
+"
+sudo systemctl restart tradingbot-copy-bot
+
+# Step 4: Watch shadow P&L for 2+ weeks, then promote to live
+```
+
+## Running a single batch
+
+```bash
+.venv/bin/python scripts/screen_directional.py        # wallets 0–59
+.venv/bin/python scripts/screen_directional.py 60     # wallets 60–119
+```
+
+## Verifying specific addresses directly
+
+```bash
+.venv/bin/python scripts/verify_passers.py --addresses 0xABC,0xDEF,0xGHI
+```
+
+Output:
+```
+#    address           pos_value  all_time_pnl  biggest_win  predictions  screen_wr  status
+1    0x7eb89b08c2e8…     $39.0K        +$7.4K        $7.4K           34          —  looks promising
+2    0xfe202bb8f5c8…       $819       -$39.1K          $16           30          —  NEGATIVE ALL-TIME — SKIP
 ```
 
 ## Configuration
 
-Thresholds live in `pm-screen.yml` — copy it next to the script or pass
-`--config path/to/file.yml`. Every key is optional; omitted keys fall
-back to built-in defaults.
+Thresholds live in `pm-screen.yml`. Every key is optional — omitted keys
+fall back to built-in defaults.
 
 ```yaml
 filters:
@@ -103,9 +141,6 @@ deep_screen:
 
 ## CLI flags
 
-CLI flags override the config file for fast threshold iteration without
-editing any file:
-
 ```bash
 .venv/bin/python scripts/screen_directional.py --min-win-rate 0.65
 .venv/bin/python scripts/screen_directional.py --min-closed 25 --dry-run
@@ -119,7 +154,7 @@ editing any file:
 | `--min-closed N` | Override `filters.min_closed_markets` |
 | `--min-closed-pnl F` | Override `filters.min_closed_pnl` |
 | `--dry-run` | Screen but write no output files |
-| `--cache-only` | Only evaluate wallets already in the cache; no fresh fetches |
+| `--cache-only` | Only evaluate wallets already in the cache |
 
 ## Output files
 
@@ -133,14 +168,14 @@ export PM_SCREEN_DIR=/opt/polymarket-bot/screen-results
 | File | Contents |
 |---|---|
 | `passers.json` | Wallets that passed every filter, ranked by win rate |
+| `verified_passers.json` | Passers with live profile data attached |
 | `metrics.json` | Run stats, timing, rejection breakdown, passers summary |
-| `screened_wallets.json` | Per-wallet metrics cache (1-day TTL); repeat runs reuse fresh entries and print `CACHED` |
-| `discovered.json` | Phase 1 checkpoint — delete to force a fresh market crawl |
+| `screened_wallets.json` | Per-wallet metrics cache (1-day TTL) |
+| `discovered.json` | Phase 1 checkpoint — delete to force a fresh crawl |
 
 ## Rejection breakdown
 
-Every run prints a breakdown of which filters blocked candidates — the
-primary tool for tuning thresholds:
+Every screen run prints which filters blocked the most candidates:
 
 ```
 === REJECTION BREAKDOWN (57 rejected, 60 screened) ===
@@ -153,24 +188,7 @@ primary tool for tuning thresholds:
   whale_single_trade              5   (8.3%)
 ```
 
-The breakdown is also saved to `metrics.json` for programmatic use.
-
-## IMPORTANT: passers are candidates, not conclusions
-
-The screen analyzes a recent window (~3,000 trades). A lifetime loser on
-a hot streak can pass. **Always open the wallet's polymarket.com profile
-and verify positive all-time profit and months of history before
-shadowing or copying anyone.**
-
-In live testing, profile verification rejected the majority of passers.
-The screen is a filter, not a verdict.
-
-**Recommended workflow:**
-1. Screen → get passers list
-2. Verify each on `polymarket.com/profile/0x...`
-3. Add survivors to the bot's shadow list
-4. Run shadow mode for 2+ weeks
-5. Only then promote to live
+Use this to tune thresholds in `pm-screen.yml`.
 
 ## Known limitations
 
@@ -179,24 +197,18 @@ The screen is a filter, not a verdict.
 - Open positions are ignored (profiles mark them to market)
 - The discovery crawl only sees wallets active in top-volume markets;
   niche-market specialists may be missed
-- The wallet cache has a 1-day TTL — if a trader's behavior changed
-  overnight, run with a fresh cache (`--cache-only` off, delete
-  `screened_wallets.json`)
+- The wallet cache has a 1-day TTL — delete `screened_wallets.json` to
+  force fresh fetches
 
 ## Version history
 
 | Version | Changes |
 |---|---|
 | v1 | Initial leaderboard + subgraph win rate screen |
-| v2 | Switched to activity-feed win rates; fixed REDEEM attribution; atomic writes; retry/backoff; `PM_SCREEN_DIR` env var |
+| v2 | Activity-feed win rates; REDEEM attribution fix; atomic writes; retry/backoff; `PM_SCREEN_DIR` env var |
 | v3 | Market-crawl discovery; moderate-activity band; realized P&L filter; `abs()` closed-market fix |
-| v4 | External YAML config; metrics/observability output; wallet cache (1-day TTL); rejection breakdown; CLI arg overrides |
-
-## License
-
-MIT for this script. This screener is an add-on — it does not include
-any source from the tradingbot engine, which is sold under a separate
-license that prohibits redistribution.
+| v4 | External YAML config; metrics output; wallet cache; rejection breakdown; CLI arg overrides |
+| v4.1 | Added `verify_passers.py` — automatic all-time profit verification via leaderboard + positions APIs |
 
 ## Staying Updated
 
@@ -211,4 +223,10 @@ Claude will handle downloading the files and uploading them to your VPS.
 **Manual way:**
 1. Download any changed files from the repo
 2. Upload to your VPS: `scp file.py root@YOUR_VPS_IP:/opt/polymarket-bot/scripts/`
-3. That's it — no reinstall or bot restart required
+3. No reinstall or bot restart required
+
+## License
+
+MIT for these scripts. This screener is an add-on — it does not include
+any source from the tradingbot engine, which is sold under a separate
+license that prohibits redistribution.
