@@ -1,9 +1,9 @@
 # Polymarket Deep Screener
 
-A three-step pipeline that finds **directional human traders** on
-Polymarket, filters out bots/whales/leaderboard frauds, and
-automatically verifies their all-time profit before you shadow anyone.
-Built as an add-on for the tradingbot copy-trading engine.
+A four-phase pipeline that finds **directional human traders** on
+Polymarket, filters out bots/whales/leaderboard frauds, and produces
+two tiers of shadow candidates ranked by confidence. Built as an add-on
+for the tradingbot copy-trading engine.
 
 ## Why
 
@@ -17,16 +17,17 @@ The Polymarket profit leaderboard is almost useless for copy trading:
   and still lose money (small wins on favorites, occasional big losses)
 
 In live testing, **11 out of 13 screener passers had negative all-time
-profit** when verified against their full profile. The pipeline below
-catches all of them automatically.
+profit** when verified. The pipeline below catches all of them
+automatically and separates the few genuine traders into two tiers.
 
-## The three scripts
+## The four scripts
 
-| Script | What it does |
-|---|---|
-| `screen_directional.py` | Phase 1 + 2: discovers human-sized wallets from active markets, deep-screens for win rate + realized P&L |
-| `verify_passers.py` | Pulls live all-time profit, positions value, biggest win, and trade count for every passer — flags negative all-time automatically |
-| `pm-screen.yml` | Config file for all thresholds — no code edits needed |
+| Script | Phase | What it does |
+|---|---|---|
+| `screen_directional.py` | 1 + 2 | Crawls active markets, discovers human-sized wallets, deep-screens for win rate + realized P&L |
+| `verify_passers.py` | 3a + 3b | Tier 1: kills negative all-time P&L. Tier 2: deep-dives survivors for consistency, conviction, and drawdown |
+| `run_pipeline.sh` | All | Runs everything in one command |
+| `pm-screen.yml` | Config | All thresholds in one file — no code edits needed |
 
 ## How it works
 
@@ -41,7 +42,7 @@ pulls ~3,000 trades + redemption events per wallet, reconstructs
 per-market cashflows, and computes win rate and realized P&L over
 markets the wallet fully exited in-window.
 
-A wallet **passes** when it is:
+A wallet **passes Phase 2** when it is:
 - **Winning:** ≥60% win rate over ≥20 closed markets
 - **Profitable:** ≥$500 realized P&L on those closed markets
 - **Directional:** trades both sides in <30% of markets
@@ -49,9 +50,29 @@ A wallet **passes** when it is:
 - **Human-sized:** $20–$5,000 median trade, no single trade >$50k
 - **Active:** traded within the last 14 days
 
-**Phase 3 — verify.** `verify_passers.py` fetches live profile data for
-every passer — all-time profit, positions value, biggest win, prediction
-count — and flags anyone with negative all-time P&L as `SKIP`.
+**Phase 3a — Tier 1 verify (fast).** Pulls live all-time profit,
+positions value, biggest win, and prediction count from the Polymarket
+API. Any wallet with negative all-time P&L is immediately flagged SKIP.
+
+**Phase 3b — Tier 2 deep dive (slower).** Pulls ~3,000 trades of
+history and runs six deeper signals on Tier 1 survivors:
+
+| Signal | What it catches |
+|---|---|
+| Win rate across 3 time buckets (90d, 60d, 30d) | Single lucky streak vs consistent edge |
+| Market concentration (unique mkts / total trades) | Bot spray-and-pray vs conviction |
+| Average holding period | Scalpers (bad for copying) vs patient holders |
+| Worst drawdown / average win ratio | Hidden tail risk |
+| Trade size consistency (coefficient of variation) | Tilt, strategy changes, shared wallets |
+| Recent activity (trades in last 30d) | Still actively trading |
+
+## Output tiers
+
+| Tier | Criteria | Action |
+|---|---|---|
+| **Priority Shadow** | Passed all 4 phases including Tier 2 deep dive | Shadow immediately |
+| **Shadow with Caution** | Passed Phase 2 + Tier 1 only | Shadow with lower allocation, monitor closely |
+| **Skip** | Negative all-time P&L | Do not shadow |
 
 ## Install
 
@@ -60,64 +81,62 @@ scripts import its API clients and shadow list — no bot files are
 included or modified.
 
 ```bash
-cp screen_directional.py verify_passers.py pm-screen.yml /opt/polymarket-bot/scripts/
+cp screen_directional.py verify_passers.py run_pipeline.sh pm-screen.yml \
+   /opt/polymarket-bot/scripts/
+chmod +x /opt/polymarket-bot/scripts/run_pipeline.sh
 cd /opt/polymarket-bot
 ```
 
-## Full workflow
+## One-command pipeline (recommended)
 
 ```bash
-# Step 1: Run the screen (all batches, ~2 hours)
-for off in 0 60 120 180 240 300 360 420 480 540 600 660 720 780 840; do
-  echo "===== BATCH $off ====="
-  .venv/bin/python scripts/screen_directional.py $off
-done 2>&1 | tee /tmp/screen-v3/full-run.log
+# Full run — all ~900 wallets, all four phases (~30 min with cache)
+./scripts/run_pipeline.sh
 
-# Check who passed
-grep -E "PASS|BATCH" /tmp/screen-v3/full-run.log
+# Start from a specific batch (useful if resuming)
+./scripts/run_pipeline.sh 60
 
-# Step 2: Verify passers against live profile data
-.venv/bin/python scripts/verify_passers.py
-
-# Step 3: Add survivors to shadow list
-.venv/bin/python -c "
-from src.shadow_list import ShadowList
-sl = ShadowList()
-sl.add_trader('0xADDRESS_HERE', 'name', 'screener')
-print(sl.as_watched_map())
-"
-sudo systemctl restart tradingbot-copy-bot
-
-# Step 4: Watch shadow P&L for 2+ weeks, then promote to live
+# Run a subset of batches
+./scripts/run_pipeline.sh 0 180
 ```
 
-## Running a single batch
+**What happens automatically:**
+1. Each batch of 60 wallets is screened (phases 1+2)
+2. Any passers are immediately Tier 1 verified (kills negative P&L fast)
+3. After all batches complete, all Tier 1 survivors get the full Tier 2 deep dive
+4. Final summary shows Priority Shadow and Shadow with Caution lists
+
+Example final output:
+```
+=== PRIORITY SHADOW — Tier 2 verified ===
+  0xABC…  all_time=+$12K  screen_wr=87%  hold=8.3d  conc=51%  dd=2.1x
+
+=== SHADOW WITH CAUTION — Tier 1 only ===
+  0xDEF…  all_time=+$7.4K  screen_wr=82%  t2_failed: wr_inconsistent, high_drawdown
+```
+
+## Running manually
 
 ```bash
-.venv/bin/python scripts/screen_directional.py        # wallets 0–59
-.venv/bin/python scripts/screen_directional.py 60     # wallets 60–119
-```
+# Screen one batch
+.venv/bin/python scripts/screen_directional.py 0
 
-## Verifying specific addresses directly
+# Tier 1 verify only (fast)
+.venv/bin/python scripts/verify_passers.py --tier1-only
 
-```bash
-.venv/bin/python scripts/verify_passers.py --addresses 0xABC,0xDEF,0xGHI
-```
+# Full Tier 1 + 2 verify on specific addresses
+.venv/bin/python scripts/verify_passers.py --addresses 0xABC,0xDEF
 
-Output:
-```
-#    address           pos_value  all_time_pnl  biggest_win  predictions  screen_wr  status
-1    0x7eb89b08c2e8…     $39.0K        +$7.4K        $7.4K           34          —  looks promising
-2    0xfe202bb8f5c8…       $819       -$39.1K          $16           30          —  NEGATIVE ALL-TIME — SKIP
+# Skip Tier 2 for all passers
+.venv/bin/python scripts/verify_passers.py --tier1-only
 ```
 
 ## Configuration
 
-Thresholds live in `pm-screen.yml`. Every key is optional — omitted keys
-fall back to built-in defaults.
+All thresholds live in `pm-screen.yml`. Every key is optional.
 
 ```yaml
-filters:
+filters:              # Phase 2 screen thresholds
   min_win_rate: 0.60
   min_closed_markets: 20
   max_two_sided_ratio: 0.30
@@ -129,14 +148,22 @@ filters:
   max_days_since_trade: 14
   min_closed_pnl: 500.0
 
-discovery:
+discovery:            # Phase 1 crawl settings
   n_markets: 120
   band_min_trades: 5
   band_max_trades: 50
 
-deep_screen:
+deep_screen:          # Phase 2 depth
   n_deep: 60
   pages: 3
+
+tier2_filters:        # Phase 3b deep dive thresholds
+  min_bucket_wr: 0.55       # win rate must hold across all time buckets
+  min_concentration: 0.25   # unique markets / total trades
+  min_hold_days: 1.0        # avg holding period in days
+  max_drawdown_ratio: 4.0   # worst loss / avg win
+  max_size_cv: 2.0          # trade size coefficient of variation
+  min_recent_trades: 5      # trades in last 30 days
 ```
 
 ## CLI flags
@@ -145,6 +172,7 @@ deep_screen:
 .venv/bin/python scripts/screen_directional.py --min-win-rate 0.65
 .venv/bin/python scripts/screen_directional.py --min-closed 25 --dry-run
 .venv/bin/python scripts/screen_directional.py --cache-only
+.venv/bin/python scripts/verify_passers.py --tier1-only
 ```
 
 | Flag | Effect |
@@ -154,12 +182,13 @@ deep_screen:
 | `--min-closed N` | Override `filters.min_closed_markets` |
 | `--min-closed-pnl F` | Override `filters.min_closed_pnl` |
 | `--dry-run` | Screen but write no output files |
-| `--cache-only` | Only evaluate wallets already in the cache |
+| `--cache-only` | Only evaluate cached wallets |
+| `--tier1-only` | Skip Tier 2 deep dive in verify_passers.py |
 
 ## Output files
 
-All outputs go to `$PM_SCREEN_DIR` (default `/tmp/screen-v3`). Set the
-env var to a persistent path to survive reboots:
+All outputs go to `$PM_SCREEN_DIR` (default `/tmp/screen-v3`). Set to a
+persistent path to survive reboots:
 
 ```bash
 export PM_SCREEN_DIR=/opt/polymarket-bot/screen-results
@@ -167,48 +196,61 @@ export PM_SCREEN_DIR=/opt/polymarket-bot/screen-results
 
 | File | Contents |
 |---|---|
-| `passers.json` | Wallets that passed every filter, ranked by win rate |
-| `verified_passers.json` | Passers with live profile data attached |
-| `metrics.json` | Run stats, timing, rejection breakdown, passers summary |
-| `screened_wallets.json` | Per-wallet metrics cache (1-day TTL) |
-| `discovered.json` | Phase 1 checkpoint — delete to force a fresh crawl |
+| `passers.json` | Phase 2 passers for the current batch |
+| `verified_passers.json` | Latest verify run with Tier 1 + 2 results |
+| `all_verified_passers.json` | Accumulated Tier 1 survivors across all batches |
+| `metrics.json` | Run stats, timing, rejection breakdown |
+| `screened_wallets.json` | Per-wallet cache (1-day TTL) |
+| `discovered.json` | Phase 1 checkpoint — delete to force re-crawl |
+| `pipeline.log` | Full log of every pipeline run |
 
 ## Rejection breakdown
 
-Every screen run prints which filters blocked the most candidates:
+Every screen batch prints which filters blocked the most candidates:
 
 ```
-=== REJECTION BREAKDOWN (57 rejected, 60 screened) ===
-  not_profitable_enough          39  (65.0%)
-  too_much_two_sided             36  (60.0%)
-  low_win_rate                   27  (45.0%)
-  insufficient_closed_markets    24  (40.0%)
-  too_many_trades                22  (36.7%)
-  outside_trade_size_range       18  (30.0%)
-  whale_single_trade              5   (8.3%)
+=== REJECTION BREAKDOWN (55 rejected, 60 screened) ===
+  not_profitable_enough          50  (90.9%)
+  too_much_two_sided             35  (63.6%)
+  low_win_rate                   27  (49.1%)
 ```
 
 Use this to tune thresholds in `pm-screen.yml`.
 
+## IMPORTANT: even passers need judgment
+
+The screen + Tier 1 + Tier 2 pipeline is rigorous but not infallible:
+- Priority Shadow = high confidence, but still run shadow mode 2+ weeks before going live
+- Shadow with Caution = positive all-time profit but inconsistencies detected — lower allocation, watch closely
+- Never promote to live without reviewing shadow P&L data
+
+**Recommended workflow:**
+1. Run `./scripts/run_pipeline.sh`
+2. Add Priority Shadow wallets to the bot's shadow list
+3. Optionally add Shadow with Caution wallets with reduced `base_usd`
+4. Run shadow mode 2+ weeks
+5. Promote to live only wallets that clear your shadow P&L bar
+
 ## Known limitations
 
-- SPLIT / MERGE / CONVERSION cashflows are not tracked; in-window P&L
-  can differ from Polymarket's profile P&L
-- Open positions are ignored (profiles mark them to market)
-- The discovery crawl only sees wallets active in top-volume markets;
-  niche-market specialists may be missed
-- The wallet cache has a 1-day TTL — delete `screened_wallets.json` to
-  force fresh fetches
+- SPLIT / MERGE / CONVERSION cashflows not tracked; in-window P&L can
+  differ from Polymarket's profile P&L
+- Open positions ignored (profiles mark them to market)
+- Discovery crawl only sees wallets in top-volume markets; niche-market
+  specialists may be missed
+- Wallet cache has 1-day TTL — delete `screened_wallets.json` to force
+  fresh fetches
 
 ## Version history
 
 | Version | Changes |
 |---|---|
 | v1 | Initial leaderboard + subgraph win rate screen |
-| v2 | Activity-feed win rates; REDEEM attribution fix; atomic writes; retry/backoff; `PM_SCREEN_DIR` env var |
-| v3 | Market-crawl discovery; moderate-activity band; realized P&L filter; `abs()` closed-market fix |
-| v4 | External YAML config; metrics output; wallet cache; rejection breakdown; CLI arg overrides |
-| v4.1 | Added `verify_passers.py` — automatic all-time profit verification via leaderboard + positions APIs |
+| v2 | Activity-feed win rates; REDEEM attribution fix; atomic writes; retry/backoff |
+| v3 | Market-crawl discovery; moderate-activity band; realized P&L filter |
+| v4 | External YAML config; metrics output; wallet cache; rejection breakdown; CLI overrides |
+| v4.1 | `verify_passers.py` — automatic all-time profit verification |
+| v4.2 | Two-tier verification: Tier 1 (all-time profit) + Tier 2 deep dive (6 signals); `run_pipeline.sh` updated to run all phases end-to-end |
 
 ## Staying Updated
 
@@ -230,40 +272,3 @@ Claude will handle downloading the files and uploading them to your VPS.
 MIT for these scripts. This screener is an add-on — it does not include
 any source from the tradingbot engine, which is sold under a separate
 license that prohibits redistribution.
-
-## One-command pipeline (recommended)
-
-Instead of running screen + verify separately, use `run_pipeline.sh` to
-do everything in one shot:
-
-```bash
-# Full run — all 899 wallets, screen + verify each batch automatically
-./scripts/run_pipeline.sh
-
-# Start from a specific batch (useful if resuming)
-./scripts/run_pipeline.sh 60
-
-# Run a subset of batches
-./scripts/run_pipeline.sh 0 180
-```
-
-What it does for each batch:
-1. Runs `screen_directional.py` (phase 1 + 2)
-2. If any wallets pass, **immediately** runs `verify_passers.py` (phase 3)
-3. Accumulates all verified results in `all_verified_passers.json`
-4. Prints a final summary at the end
-
-Example final output:
-```
-=== FINAL PIPELINE SUMMARY ===
-  Total verified:  15
-  Promising:       1
-  Negative P&L:    13
-  Unclear/error:   1
-
-=== WORTH SHADOWING (1) ===
-  0x7eb89b08c2e8…  all_time=+$7,406  screen_wr=82%  predictions=34
-```
-
-Full log saved to `$PM_SCREEN_DIR/pipeline.log`. The entire 899-wallet
-run takes ~30 minutes (most wallets load from cache after the first run).
