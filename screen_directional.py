@@ -384,7 +384,7 @@ def metrics(trades: list[dict], redeems: list[dict]) -> dict:
         # redeems of pre-window buys (net negative shares) don't count as
         # closed and book payout as free profit. A pure absolute threshold
         # (e.g. <$5) breaks on large positions; the hybrid is intentional.
-        tolerance = max(0.02 * f["out"], 1.0)
+        tolerance = 0.02 * f["out"]  # pure 2% — consistent relative threshold
         if abs(f["sh"]) <= tolerance:
             closed += 1
             closed_pnl += f["in"] - f["out"]
