@@ -10,7 +10,7 @@ filters:
   max_two_sided_ratio: 0.30   # max fraction of markets traded both sides
   min_trades_30d: 10          # minimum trades in last 30 days
   max_trades_30d: 1500        # maximum trades in last 30 days (bot filter)
-  min_median_usd: 20.0        # minimum median trade size in USDC
+  min_median_usd: 10.0        # minimum median trade size in USDC
   max_median_usd: 5000.0      # maximum median trade size in USDC
   max_single_trade_usd: 50000.0  # maximum single trade size (whale filter)
   max_days_since_trade: 14    # must have traded within this many days
@@ -19,7 +19,7 @@ filters:
 discovery:
   n_markets: 120              # top N markets by volume to crawl
   band_min_trades: 5          # minimum trades observed in crawl (bot filter)
-  band_max_trades: 50         # maximum trades observed in crawl (bot filter)
+  band_max_trades: 150         # maximum trades observed in crawl (bot filter)
 
 deep_screen:
   n_deep: 60                  # wallets to deep-screen per batch

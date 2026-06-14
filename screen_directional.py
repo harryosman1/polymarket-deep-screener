@@ -247,7 +247,10 @@ def discover(api: DataApiClient, cfg: dict, stats: dict) -> list[dict]:
         return out
 
     with GammaClient() as gamma:
-        markets = gamma.get_markets(active=True, closed=False, limit=500)
+        active_markets = gamma.get_markets(active=True, closed=False, limit=500)
+        closed_markets = gamma.get_markets(active=False, closed=True, limit=500)
+        markets = active_markets + closed_markets
+        print(f"[discover] {len(active_markets)} active + {len(closed_markets)} recently closed markets")
 
     def vol(m):
         for k in ("volume24hr", "volume24hrClob", "volumeNum", "volume"):
