@@ -451,11 +451,28 @@ def main() -> None:
                 t1_status = f"ERROR: {stats['error']}"
                 t1_ok = False
             elif atp is not None and atp < 0:
-                t1_status = "NEGATIVE — SKIP"
-                t1_ok = False
+                # Win rate override: high WR + enough predictions passes despite negative cashPnl
+                # (cashPnl distortion: unrealized losses drag all-time negative for active traders)
+                wr = sd.get("win_rate") or 0
+                closed = sd.get("closed_markets") or 0
+                preds = stats.get("predictions") or 0
+                # Use screen win_rate if available, otherwise check predictions count
+                if (wr >= 0.60 and closed >= 50) or (wr == 0 and preds >= 100):
+                    t1_status = "T1 PASS (wr override)"
+                    t1_ok = True
+                else:
+                    t1_status = "NEGATIVE — SKIP"
+                    t1_ok = False
             elif atp is not None and atp < 500:
-                t1_status = "LOW ALL-TIME — SKIP"
-                t1_ok = False
+                wr = sd.get("win_rate") or 0
+                closed = sd.get("closed_markets") or 0
+                preds = stats.get("predictions") or 0
+                if (wr >= 0.60 and closed >= 50) or (wr == 0 and preds >= 100):
+                    t1_status = "T1 PASS (wr override)"
+                    t1_ok = True
+                else:
+                    t1_status = "LOW ALL-TIME — SKIP"
+                    t1_ok = False
             elif atp is None:
                 t1_status = "no data — check manually"
                 t1_ok = False
