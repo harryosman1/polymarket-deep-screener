@@ -6,49 +6,32 @@
 # ---------------------------------------------------------------------------
 filters:
   min_win_rate: 0.60          # minimum win rate over closed markets
-  min_closed_markets: 20      # minimum number of fully closed markets in window
-  max_two_sided_ratio: 0.30   # max fraction of markets traded both sides
+  min_closed_markets: 10      # minimum number of fully closed markets in window
+  max_two_sided_ratio: 0.40   # max fraction of markets traded both sides
   min_trades_30d: 10          # minimum trades in last 30 days
-  max_trades_30d: 1500        # maximum trades in last 30 days (bot filter)
+  max_trades_30d: 5000        # maximum trades in last 30 days (bot filter)
   min_median_usd: 10.0        # minimum median trade size in USDC
   max_median_usd: 5000.0      # maximum median trade size in USDC
   max_single_trade_usd: 50000.0  # maximum single trade size (whale filter)
   max_days_since_trade: 14    # must have traded within this many days
-  min_closed_pnl: 500.0       # minimum realized P&L on closed markets
+  min_closed_pnl: 200.0       # minimum realized P&L on closed markets
 
 discovery:
   n_markets: 120              # top N markets by volume to crawl
   band_min_trades: 5          # minimum trades observed in crawl (bot filter)
-  band_max_trades: 150         # maximum trades observed in crawl (bot filter)
+  band_max_trades: 150        # maximum trades observed in crawl (bot filter)
 
 deep_screen:
-  n_deep: 60                  # wallets to deep-screen per batch
-  pages: 3                    # pages of 1000 trades to pull per wallet
+  n_deep: 99999               # screen ALL discovered wallets
+  pages: 5                    # pages of 1000 trades to pull per wallet
 
 # ---------------------------------------------------------------------------
 # Phase 3: verify_passers.py — Tier 2 deep dive thresholds
 # ---------------------------------------------------------------------------
 tier2_filters:
-  # Win rate must be >= this in each 30-day bucket (90–60d, 60–30d, last 30d)
-  # Catches traders on a single lucky streak
   min_bucket_wr: 0.55
-
-  # Unique markets / total trades — low ratio = spraying bets like a bot
-  # 0.25 means at least 1 unique market per 4 trades
   min_concentration: 0.25
-
-  # Average holding period in days — below this = scalper (bad for copying
-  # due to timing slippage by the time your bot sees the trade)
   min_hold_days: 1.0
-
-  # Worst single loss / average win — above this = hidden tail risk
-  # e.g. 4.0 means worst loss must be < 4x the average win
-  max_drawdown_ratio: 4.0
-
-  # Trade size coefficient of variation (std / mean)
-  # Above this = erratic sizing (tilt, strategy changes, or multiple traders
-  # sharing one wallet)
+  max_drawdown_ratio: 5.0
   max_size_cv: 2.0
-
-  # Minimum trades in last 30 days — must still be actively trading
   min_recent_trades: 5
