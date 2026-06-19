@@ -456,8 +456,10 @@ def main() -> None:
                 wr = sd.get("win_rate") or 0
                 closed = sd.get("closed_markets") or 0
                 preds = stats.get("predictions") or 0
-                # Use screen win_rate if available, otherwise check predictions count
-                if (wr >= 0.60 and closed >= 50) or (wr == 0 and preds >= 100):
+                # Trust win_rate if it's present and sample size (closed markets OR
+                # predictions, whichever is available) is large enough
+                sample_size = max(closed, preds)
+                if (wr >= 0.60 and sample_size >= 50) or (wr == 0 and preds >= 100):
                     t1_status = "T1 PASS (wr override)"
                     t1_ok = True
                 else:
@@ -467,7 +469,8 @@ def main() -> None:
                 wr = sd.get("win_rate") or 0
                 closed = sd.get("closed_markets") or 0
                 preds = stats.get("predictions") or 0
-                if (wr >= 0.60 and closed >= 50) or (wr == 0 and preds >= 100):
+                sample_size = max(closed, preds)
+                if (wr >= 0.60 and sample_size >= 50) or (wr == 0 and preds >= 100):
                     t1_status = "T1 PASS (wr override)"
                     t1_ok = True
                 else:
