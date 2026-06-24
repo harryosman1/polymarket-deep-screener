@@ -165,6 +165,39 @@ print(f'Built tier2_passers.json with {len(result)} wallets')
     else
       $PYTHON "$VERIFY" --addresses "$ADDRESSES" 2>&1 | tee -a "$LOG"
     fi
+
+    # Merge the freshly-computed Tier 2 results back into
+    # all_verified_passers.json by address. Without this, the final Tier 2
+    # deep-dive only ever lands in verified_passers.json (the single-batch
+    # working file, overwritten every batch) — leaving every entry in the
+    # CUMULATIVE all_verified_passers.json permanently stuck at
+    # tier2: null, even for wallets that genuinely passed. Confirmed this
+    # exact bug Jun 24 — the Priority Shadow summary printed correctly to
+    # the log, but DashView (which reads all_verified_passers.json) showed
+    # tier2: null for every wallet, including ones known to have passed.
+    $PYTHON -c "
+import json, os
+from pathlib import Path
+
+out_dir = os.environ.get('PM_SCREEN_DIR', '/tmp/screen-v3')
+all_path = Path(out_dir) / 'all_verified_passers.json'
+tier2_results_path = Path(out_dir) / 'verified_passers.json'
+
+all_data = json.loads(all_path.read_text()) if all_path.exists() else []
+tier2_data = json.loads(tier2_results_path.read_text()) if tier2_results_path.exists() else []
+
+tier2_by_addr = {r['address'].lower(): r.get('tier2') for r in tier2_data if r.get('address')}
+
+updated = 0
+for entry in all_data:
+    addr = entry.get('address', '').lower()
+    if addr in tier2_by_addr and tier2_by_addr[addr] is not None:
+        entry['tier2'] = tier2_by_addr[addr]
+        updated += 1
+
+all_path.write_text(json.dumps(all_data, indent=2))
+print(f'[pipeline] Merged Tier 2 results into all_verified_passers.json: {updated} wallet(s) updated')
+" 2>&1 | tee -a "$LOG"
   fi
 else
   echo "No Tier 1 survivors to deep-dive." | tee -a "$LOG"

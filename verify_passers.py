@@ -416,7 +416,32 @@ def main() -> None:
 
     if args.addresses:
         addresses = [a.strip().lower() for a in args.addresses.split(",")]
+        # Pull real screen metrics (win_rate, closed count) from
+        # screened_wallets.json if available, instead of leaving screen_data
+        # empty for every address. Without this, the Tier 1 win-rate
+        # override (designed specifically to rescue wallets whose all-time
+        # P&L is dragged negative by CURRENTLY-OPEN unrealized losses, even
+        # though their REALIZED/closed track record is excellent) can never
+        # fire when running via --addresses, since it has no win_rate/closed
+        # data to evaluate. Confirmed this exact bug 2026-06-24: a wallet
+        # with $69,199 closed_pnl and 90.2% win rate over 225 closed markets
+        # was rejected as "NEGATIVE — SKIP" purely because its current open
+        # positions happened to be underwater that day.
         screen_data = {a: {} for a in addresses}
+        screened_path = OUT_DIR / "screened_wallets.json"
+        if screened_path.exists():
+            try:
+                screened = json.loads(screened_path.read_text())
+                for addr in addresses:
+                    entry = screened.get(addr) or screened.get(addr.lower())
+                    if entry:
+                        m = entry.get("metrics", {})
+                        screen_data[addr] = {
+                            "win_rate": m.get("win_rate"),
+                            "closed_markets": m.get("closed"),
+                        }
+            except Exception as exc:
+                print(f"[warn] could not load screened_wallets.json for win-rate override data: {exc}")
     else:
         pf = Path(args.passers)
         if not pf.exists():
