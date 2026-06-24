@@ -166,6 +166,16 @@ def parse_args() -> argparse.Namespace:
                    help="don't write passers.json / metrics.json / cache")
     p.add_argument("--cache-only", action="store_true",
                    help="only use cached wallet metrics; skip wallets not cached")
+    p.add_argument("--deep", action="store_true",
+                   help="DEEP DISCOVERY MODE: paginate through ALL active markets "
+                        "(~2,100 as of Jun 2026) instead of just the top n_markets "
+                        "by volume. Much more thorough (found 151,816 raw wallets / "
+                        "24,542 human-size wallets in testing, vs ~21,901 raw / "
+                        "~1,135 human-size with the default fast mode) but takes "
+                        "~9 minutes for discovery alone, and the downstream Tier 1/2 "
+                        "screen on the much larger resulting wallet pool can take "
+                        "hours. Recommended for occasional manual/deliberate runs, "
+                        "not as the default for unattended automated cron runs.")
     return p.parse_args()
 
 
@@ -234,7 +244,7 @@ def _with_retry(fn, label: str):
     raise last_exc
 
 
-def discover(api: DataApiClient, cfg: dict, stats: dict) -> list[dict]:
+def discover(api: DataApiClient, cfg: dict, stats: dict, deep: bool = False) -> list[dict]:
     d = cfg["discovery"]
     f = cfg["filters"]
     ckpt = OUT_DIR / "discovered.json"
@@ -246,11 +256,39 @@ def discover(api: DataApiClient, cfg: dict, stats: dict) -> list[dict]:
         stats["wallets_human_sized"] = len(out)
         return out
 
-    with GammaClient() as gamma:
-        active_markets = gamma.get_markets(active=True, closed=False, limit=500)
-        closed_markets = gamma.get_markets(active=False, closed=True, limit=500)
-        markets = active_markets + closed_markets
-        print(f"[discover] {len(active_markets)} active + {len(closed_markets)} recently closed markets")
+    if deep:
+        # DEEP MODE: paginate through ALL active markets via offset, not just
+        # a single capped get_markets() call. Gamma's API has a hard 100-
+        # market-per-request cap regardless of limit= requested (confirmed
+        # 2026-06-23), so real coverage requires looping with offset until
+        # the API itself errors out (a real platform-side limit around
+        # offset=2100 as of testing, NOT a bug — must catch and stop
+        # gracefully rather than crash).
+        print("[discover] DEEP MODE — paginating through all active markets")
+        with GammaClient() as gamma:
+            active_markets = []
+            offset = 0
+            while True:
+                try:
+                    batch = gamma.get_markets(active=True, closed=False, limit=100, offset=offset)
+                except Exception as exc:
+                    print(f"[discover] pagination stopped at offset={offset}: {str(exc)[:60]}")
+                    break
+                if not batch:
+                    break
+                active_markets.extend(batch)
+                offset += 100
+                if len(batch) < 100:
+                    break
+            closed_markets = gamma.get_markets(active=False, closed=True, limit=500)
+            markets = active_markets + closed_markets
+            print(f"[discover] {len(active_markets)} active (deep) + {len(closed_markets)} recently closed markets")
+    else:
+        with GammaClient() as gamma:
+            active_markets = gamma.get_markets(active=True, closed=False, limit=500)
+            closed_markets = gamma.get_markets(active=False, closed=True, limit=500)
+            markets = active_markets + closed_markets
+            print(f"[discover] {len(active_markets)} active + {len(closed_markets)} recently closed markets")
 
     def vol(m):
         for k in ("volume24hr", "volume24hrClob", "volumeNum", "volume"):
@@ -261,7 +299,11 @@ def discover(api: DataApiClient, cfg: dict, stats: dict) -> list[dict]:
         return 0.0
 
     markets.sort(key=vol, reverse=True)
-    markets = [m for m in markets if m.get("conditionId")][:d["n_markets"]]
+    if deep:
+        # Deep mode: crawl ALL discovered markets, not just the top n_markets.
+        markets = [m for m in markets if m.get("conditionId")]
+    else:
+        markets = [m for m in markets if m.get("conditionId")][:d["n_markets"]]
     print(f"[discover] crawling {len(markets)} active markets by volume")
     stats["markets_crawled"] = len(markets)
 
@@ -483,7 +525,7 @@ def main() -> None:
 
     with DataApiClient() as api:
         cands = [
-            c for c in discover(api, cfg, stats_discovery)
+            c for c in discover(api, cfg, stats_discovery, deep=args.deep)
             if c["address"] not in already
             and d["band_min_trades"] <= c["n"] <= d["band_max_trades"]
         ]

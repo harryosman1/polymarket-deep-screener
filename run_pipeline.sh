@@ -8,9 +8,19 @@
 #            finds Priority Shadow candidates from all Tier 1 survivors
 #
 # Usage:
-#   ./scripts/run_pipeline.sh              # all batches (0-840)
-#   ./scripts/run_pipeline.sh 60           # start from batch 60
-#   ./scripts/run_pipeline.sh 0 180        # batches 0, 60, 120 only
+#   ./scripts/run_pipeline.sh              # fast mode, all batches (0-840)
+#   ./scripts/run_pipeline.sh 60           # fast mode, start from batch 60
+#   ./scripts/run_pipeline.sh 0 180        # fast mode, batches 0, 60, 120 only
+#   ./scripts/run_pipeline.sh --deep       # DEEP mode: discovers ALL ~2,100
+#                                           # active markets (vs top 120),
+#                                           # defaults END to 24600 to cover
+#                                           # the much larger resulting
+#                                           # wallet pool (~24,500 human-size
+#                                           # wallets vs ~1,135 in fast mode).
+#                                           # Takes hours, not minutes — run
+#                                           # deliberately, not via the
+#                                           # automated cron job.
+#   ./scripts/run_pipeline.sh --deep 0 5000  # deep mode, custom END override
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,8 +33,33 @@ LOG="$OUT_DIR/pipeline.log"
 PASSERS="$OUT_DIR/passers.json"
 ALL_VERIFIED="$OUT_DIR/all_verified_passers.json"
 
-START="${1:-0}"
-END="${2:-840}"
+# Parse --deep flag from anywhere in the arguments, leaving the remaining
+# positional args (START, END) intact regardless of where --deep appears.
+DEEP_FLAG=""
+ARGS=()
+for arg in "$@"; do
+  if [ "$arg" = "--deep" ]; then
+    DEEP_FLAG="--deep"
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+START="${ARGS[0]:-0}"
+if [ -n "$DEEP_FLAG" ]; then
+  # Deep mode discovers far more wallets (~24,500 human-size as of testing
+  # vs ~1,135 in fast mode) — the old END=840 default only covers a small
+  # fraction of that pool. Default to a very high ceiling (99999) so deep
+  # mode always screens the ENTIRE discovered pool regardless of how large
+  # it grows over time, rather than needing this number manually updated —
+  # screen_directional.py naturally stops once it runs out of wallets at a
+  # given offset, so a high ceiling costs nothing if the real pool is
+  # smaller. Override explicitly as the second positional argument if a
+  # smaller deliberate ceiling is ever wanted.
+  END="${ARGS[1]:-99999}"
+else
+  END="${ARGS[1]:-840}"
+fi
 STEP=60
 
 mkdir -p "$OUT_DIR"
@@ -45,7 +80,18 @@ while [ "$off" -le "$END" ]; do
   echo "" | tee -a "$LOG"
   echo "===== BATCH $off =====" | tee -a "$LOG"
 
-  $PYTHON "$SCREEN" "$off" 2>&1 | tee -a "$LOG"
+  $PYTHON "$SCREEN" "$off" $DEEP_FLAG 2>&1 | tee -a "$LOG"
+
+  # Stop early once we've run past the end of the discovered candidate pool
+  # (the script prints "screening 0 candidates" via Python list slicing
+  # naturally returning empty past the list end — see screen_directional.py
+  # cands[args.offset:args.offset+n_deep]). Without this check, a high
+  # default END (e.g. 99999 for --deep mode) would otherwise keep looping
+  # uselessly all the way to that ceiling after the real pool is exhausted.
+  if tail -5 "$LOG" | grep -q "screening 0 candidates"; then
+    echo "[pipeline] 0 candidates in this batch — reached end of discovered pool, stopping early." | tee -a "$LOG"
+    break
+  fi
 
   PASSER_COUNT=0
   if [ -f "$PASSERS" ]; then
@@ -98,7 +144,27 @@ if [ "$TIER1_COUNT" -gt 0 ]; then
   ADDRESSES=$($PYTHON -c "import json; d=json.load(open('$ALL_VERIFIED')); print(','.join(r['address'] for r in d))" 2>/dev/null || echo "")
 
   if [ -n "$ADDRESSES" ]; then
-    $PYTHON "$VERIFY" --addresses "$ADDRESSES" 2>&1 | tee -a "$LOG"
+    # Build a passers.json with win rates from screened_wallets.json
+    SCREENED="$OUT_DIR/screened_wallets.json"
+    TIER2_PASSERS="$OUT_DIR/tier2_passers.json"
+    if [ -f "$SCREENED" ]; then
+      $PYTHON -c "
+import json
+screened = json.loads(open('$SCREENED').read())
+verified = json.loads(open('$ALL_VERIFIED').read())
+verified_addrs = {r['address'].lower() for r in verified}
+result = []
+for addr, data in screened.items():
+    if addr.lower() in verified_addrs:
+        m = data.get('metrics', {})
+        result.append({'address': addr, 'win_rate': m.get('win_rate'), 'closed': m.get('closed',0), 'closed_pnl': m.get('closed_pnl',0)})
+open('$TIER2_PASSERS','w').write(json.dumps(result))
+print(f'Built tier2_passers.json with {len(result)} wallets')
+" 2>&1 | tee -a "$LOG"
+      $PYTHON "$VERIFY" --passers "$TIER2_PASSERS" 2>&1 | tee -a "$LOG"
+    else
+      $PYTHON "$VERIFY" --addresses "$ADDRESSES" 2>&1 | tee -a "$LOG"
+    fi
   fi
 else
   echo "No Tier 1 survivors to deep-dive." | tee -a "$LOG"

@@ -115,6 +115,67 @@ Example final output:
   0xDEF…  all_time=+$7.4K  screen_wr=82%  t2_failed: wr_inconsistent, high_drawdown
 ```
 
+## Deep mode — screen the ENTIRE active market universe, not just the top 120
+
+By default, Phase 1 discovery only crawls the top ~120 active markets by
+trading volume (out of roughly 2,100 active markets that actually exist
+on Polymarket at any given time). That is a deliberate speed tradeoff.
+It also means any skilled trader whose activity is concentrated in
+lower-volume or more niche markets is structurally invisible to the
+default mode, no matter how many times you re-run it.
+
+`--deep` removes that ceiling. It paginates through the Gamma API to
+discover every currently active market instead of just the top 120,
+then crawls trades across all of them. In testing (2026-06), this took
+discovery from roughly 21,900 raw wallets and 1,135 human-size
+candidates up to 151,816 raw wallets and roughly 24,500 human-size
+candidates -- using the exact same free data sources, no paid
+blockchain indexer or subgraph required.
+
+```bash
+# Deep mode -- screens the entire human-size candidate pool, not just
+# the first ~840 wallets. Takes hours, not minutes, because there is a
+# lot more to screen -- run it deliberately, not on a tight schedule.
+./scripts/run_pipeline.sh --deep
+
+# Deep mode with an explicit smaller ceiling, if you want to cap it
+./scripts/run_pipeline.sh --deep 0 5000
+```
+
+Tradeoffs to know before running this:
+- Discovery alone takes about 9 minutes (vs seconds for the default mode)
+- The resulting wallet pool is roughly 20x larger, so the Tier 1/2 deep
+  screen phase afterward can take hours, not minutes
+- This is intended for occasional, deliberate, attended runs, not as the
+  default for an unattended cron job. Keep the automated/scheduled
+  pipeline run on the fast/default mode unless you have watched a few
+  full `--deep` runs complete cleanly and are comfortable with the
+  longer unattended runtime.
+
+### Using the DashView app (if you have it)
+
+If you are running the DashView mobile dashboard alongside this bot,
+the Screener tab includes a button for deep mode -- tap it instead of
+the normal scan button to kick off a `--deep` run from your phone.
+
+### Using Claude (or another AI coding assistant) if you are NOT using DashView
+
+If you manage your bot directly over SSH with an AI coding assistant
+rather than through DashView, you can just ask it directly, something
+like:
+
+> "Run the deep screener -- I want to discover wallets across all
+> active Polymarket markets, not just the default top 120. Use the
+> `--deep` flag on `run_pipeline.sh`. This will take a while (discovery
+> is about 9 minutes, then the full Tier 1/2 screen on the larger pool
+> can take hours), so run it in the background and check on progress
+> periodically rather than waiting for it synchronously."
+
+A capable assistant should be able to run `./scripts/run_pipeline.sh
+--deep` in the background for you and report back on progress when
+asked, the same way it would for any other long-running shell command.
+
+
 ## Running manually
 
 ```bash
@@ -184,6 +245,7 @@ tier2_filters:        # Phase 3b deep dive thresholds
 | `--dry-run` | Screen but write no output files |
 | `--cache-only` | Only evaluate cached wallets |
 | `--tier1-only` | Skip Tier 2 deep dive in verify_passers.py |
+| `--deep` | Discover ALL active markets (~2,100), not just the top `n_markets` by volume. See "Deep mode" above. |
 
 ## Output files
 
