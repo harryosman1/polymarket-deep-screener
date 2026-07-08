@@ -82,6 +82,8 @@ DEFAULT_CONFIG: dict = {
         "max_single_trade_usd": 50_000.0,
         "max_days_since_trade": 14,
         "min_closed_pnl": 500.0,
+        "min_true_total_pnl": 0.0,
+        "max_graveyard_ratio": 0.35,
     },
     "discovery": {
         "n_markets": 120,
@@ -468,6 +470,12 @@ def evaluate(m: dict, f: dict) -> list[str]:
         reasons.append("whale_single_trade")
     if m["closed_pnl"] < f["min_closed_pnl"]:
         reasons.append("not_profitable_enough")
+    # ── Jul 8 honest-metrics gates (audit: fc318f showed 95% closed-WR
+    # but true total -$130 with 57% of markets abandoned open) ──
+    if m.get("true_total_pnl", 0) < f.get("min_true_total_pnl", 0.0):
+        reasons.append("negative_true_total")
+    if m.get("graveyard_ratio", 0) > f.get("max_graveyard_ratio", 0.35):
+        reasons.append("graveyard_holder")
     if m["days_since_trade"] > f["max_days_since_trade"]:
         reasons.append("stale")
     return reasons

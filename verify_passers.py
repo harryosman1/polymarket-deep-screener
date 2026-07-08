@@ -522,7 +522,18 @@ def main() -> None:
             results.append(stats)
 
             if t1_ok:
-                tier1_pass.append(stats)
+                # ALL-TIME GATE (Jul 8 audit): the "REJECTED: negative
+                # all-time" summary line was computed but NEVER APPLIED —
+                # wallets with -$92K all-time reached PRIORITY SHADOW.
+                # Fail-closed: no all-time data = no pass.
+                atp = stats.get("all_time_profit")
+                if atp is None or atp < 0:
+                    stats["tier1_pass"] = False
+                    stats["rejected_reason"] = (
+                        f"all_time_profit={'missing' if atp is None else round(atp,2)}"
+                    )
+                else:
+                    tier1_pass.append(stats)
 
             time.sleep(0.3)
 

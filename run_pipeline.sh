@@ -56,7 +56,7 @@ if [ -n "$DEEP_FLAG" ]; then
   # given offset, so a high ceiling costs nothing if the real pool is
   # smaller. Override explicitly as the second positional argument if a
   # smaller deliberate ceiling is ever wanted.
-  END="${ARGS[1]:-99999}"
+  END="${ARGS[1]:-9999999}"
 else
   END="${ARGS[1]:-840}"
 fi
