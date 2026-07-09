@@ -472,10 +472,15 @@ def evaluate(m: dict, f: dict) -> list[str]:
         reasons.append("not_profitable_enough")
     # ── Jul 8 honest-metrics gates (audit: fc318f showed 95% closed-WR
     # but true total -$130 with 57% of markets abandoned open) ──
-    if m.get("true_total_pnl", 0) < f.get("min_true_total_pnl", 0.0):
-        reasons.append("negative_true_total")
-    if m.get("graveyard_ratio", 0) > f.get("max_graveyard_ratio", 0.35):
-        reasons.append("graveyard_holder")
+    # FAIL-CLOSED (Jul 8 late fix): missing fields = stale pre-patch cache
+    # entry = cannot pass. The first version defaulted missing->0 which
+    # PASSED — three stale-cached wallets reached Tier 1 on old metrics.
+    ttp = m.get("true_total_pnl")
+    if ttp is None or ttp < f.get("min_true_total_pnl", 0.0):
+        reasons.append("negative_true_total" if ttp is not None else "missing_honest_metrics")
+    gr = m.get("graveyard_ratio")
+    if gr is None or gr > f.get("max_graveyard_ratio", 0.35):
+        reasons.append("graveyard_holder" if gr is not None else "missing_honest_metrics")
     if m["days_since_trade"] > f["max_days_since_trade"]:
         reasons.append("stale")
     return reasons

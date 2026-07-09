@@ -88,7 +88,7 @@ while [ "$off" -le "$END" ]; do
   # cands[args.offset:args.offset+n_deep]). Without this check, a high
   # default END (e.g. 99999 for --deep mode) would otherwise keep looping
   # uselessly all the way to that ceiling after the real pool is exhausted.
-  if tail -5 "$LOG" | grep -q "screening 0 candidates"; then
+  if tail -20 "$LOG" | grep -q "screening 0 candidates"; then
     echo "[pipeline] 0 candidates in this batch — reached end of discovered pool, stopping early." | tee -a "$LOG"
     break
   fi
