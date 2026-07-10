@@ -472,6 +472,19 @@ def main() -> None:
             sd = screen_data.get(addr, {})
             atp = stats["all_time_profit"]
 
+            def _honest_ok(sd):
+                """Fail-closed honest gate: override may only fire if honest
+                metrics are PRESENT and PASSING (true_total>0, graveyard<=35)."""
+                tt = sd.get("true_total_pnl")
+                gr = sd.get("graveyard_ratio")
+                if tt is None or gr is None:
+                    # missing honest metrics -> no override (fail closed).
+                    # NOTE: as of Jul 10 2026 screened_wallets.json does NOT
+                    # persist these fields yet — override is effectively
+                    # disabled until screen_directional persists them (queued).
+                    return False
+                return tt > 0 and gr <= 35
+
             if stats["error"] and atp is None:
                 t1_status = f"ERROR: {stats['error']}"
                 t1_ok = False
@@ -484,7 +497,7 @@ def main() -> None:
                 # Trust win_rate if it's present and sample size (closed markets OR
                 # predictions, whichever is available) is large enough
                 sample_size = max(closed, preds)
-                if (wr >= 0.60 and sample_size >= 50) or (wr == 0 and preds >= 100):
+                if _honest_ok(sd) and wr >= 0.60 and sample_size >= 50:
                     t1_status = "T1 PASS (wr override)"
                     t1_ok = True
                 else:
@@ -495,7 +508,7 @@ def main() -> None:
                 closed = sd.get("closed_markets") or 0
                 preds = stats.get("predictions") or 0
                 sample_size = max(closed, preds)
-                if (wr >= 0.60 and sample_size >= 50) or (wr == 0 and preds >= 100):
+                if _honest_ok(sd) and wr >= 0.60 and sample_size >= 50:
                     t1_status = "T1 PASS (wr override)"
                     t1_ok = True
                 else:

@@ -107,6 +107,7 @@ REASON_KEYS = {
     "whale_single_trade": "whale_max",
     "not_profitable_enough": "pnl",
     "stale": "stale",
+    "missing_honest_metrics": "no_honest",
 }
 
 
